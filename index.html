@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Температура</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #16191d; --muted: #667085;
+    --line: #e4e7ec; --accent: #d9480f; --band: rgba(217,72,15,.14);
+    --ok: #2f9e44; --bad: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101215; --card: #181b20; --text: #eceef1; --muted: #98a2b3;
+      --line: #2a2f37; --accent: #ff8c5a; --band: rgba(255,140,90,.18);
+      --ok: #51cf66; --bad: #ff6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 16px; font-weight: 600; }
+  h2 { font-size: 15px; margin: 0 0 12px; font-weight: 600; color: var(--muted); }
+  .grid { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px;
+  }
+  .big { font-size: 56px; font-weight: 700; line-height: 1; letter-spacing: -1px; }
+  .big small { font-size: 24px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+  .status { margin-top: 10px; font-size: 14px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--ok); }
+  .dot.bad { background: var(--bad); }
+  .minmax { margin-top: 10px; font-size: 14px; color: var(--muted); }
+  .wide { margin-top: 16px; }
+  .chart-box { position: relative; height: 300px; }
+  .hint { font-size: 13px; color: var(--muted); margin: 8px 0 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px; }
+  .row h2 { margin: 0; flex: 1 1 auto; }
+  input[type=date], button {
+    font: inherit; font-size: 14px; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  .err { color: var(--bad); font-size: 14px; margin-top: 8px; }
+  .empty { color: var(--muted); font-size: 14px; padding: 8px 0; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Температура</h1>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Зараз</h2>
+      <div class="big"><span id="cur">—</span><small> °C</small></div>
+      <div class="status"><span class="dot" id="curDot"></span><span id="curStatus">Завантаження…</span></div>
+    </section>
+    <section class="card">
+      <h2>Сьогодні, середня</h2>
+      <div class="big"><span id="avg">—</span><small> °C</small></div>
+      <div class="minmax" id="minmax">&nbsp;</div>
+    </section>
+  </div>
+
+  <section class="card wide">
+    <h2>Середня температура за 30 днів</h2>
+    <div class="chart-box"><canvas id="chart30"></canvas></div>
+    <p class="hint">Лінія: середня за добу. Тінь: від мінімуму до максимуму. Натисни на точку, щоб побачити день детально.</p>
+    <div class="err" id="err30" hidden></div>
+  </section>
+
+  <section class="card wide" id="daySection">
+    <div class="row">
+      <h2 id="dayTitle">Деталізація за день</h2>
+      <button id="prev" aria-label="Попередній день">←</button>
+      <input type="date" id="dayInput">
+      <button id="next" aria-label="Наступний день">→</button>
+      <button id="todayBtn">Сьогодні</button>
+    </div>
+    <div class="chart-box"><canvas id="chartDay"></canvas></div>
+    <div class="empty" id="dayEmpty" hidden>За цей день даних немає.</div>
+    <div class="err" id="errDay" hidden></div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script type="module">
+import { createClient } from "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm";
+
+// ======================= НАЛАШТУВАННЯ =======================
+const SUPABASE_URL      = "https://vaxpmvwfesnywpdfpazz.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_XU3vWUzKYaRyzu23ZDYXoA_uqS5oRF8";   // публічний ключ, його можна показувати
+const DEVICE_ID         = "esp32-01";
+const TZ                = "Europe/Kyiv";
+const OFFLINE_AFTER_MIN = 5;                 // старіше -> "датчик офлайн"
+const DAY_BUCKET_MIN    = 2;                 // крок усереднення в деталізації (720 точок/добу < ліміт 1000 рядків)
+// ============================================================
+
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const $ = (id) => document.getElementById(id);
+
+// ---------- Дати в часовому поясі TZ ----------
+const dateFmt = new Intl.DateTimeFormat("sv-SE", { timeZone: TZ });            // YYYY-MM-DD
+const hmFmt   = new Intl.DateTimeFormat("uk-UA", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false });
+const fullFmt = new Intl.DateTimeFormat("uk-UA", { timeZone: TZ, day: "numeric", month: "long", hour: "2-digit", minute: "2-digit", hour12: false });
+const dayFmt  = new Intl.DateTimeFormat("uk-UA", { timeZone: "UTC", weekday: "long", day: "numeric", month: "long", year: "numeric" });
+const shortDayFmt = new Intl.DateTimeFormat("uk-UA", { timeZone: "UTC", day: "numeric", month: "short" });
+
+const todayStr = () => dateFmt.format(new Date());
+const addDays = (s, n) => { const d = new Date(s + "T00:00:00Z"); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+const minutesOfDay = (date) => {
+  const p = Object.fromEntries(new Intl.DateTimeFormat("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit", hour12: false })
+    .formatToParts(date).map(x => [x.type, x.value]));
+  return (Number(p.hour) % 24) * 60 + Number(p.minute);
+};
+const hhmm = (m) => String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0");
+const fmt1 = (v) => (v == null ? "—" : Number(v).toFixed(1));
+
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// ---------- Поточна температура ----------
+async function loadCurrent() {
+  const { data, error } = await sb.rpc("current_reading", { p_device: DEVICE_ID });
+  if (error || !data?.length) {
+    $("cur").textContent = "—";
+    $("curDot").className = "dot bad";
+    $("curStatus").textContent = error ? "Помилка завантаження" : "Даних ще немає";
+    return;
+  }
+  const { ts, temp_c } = data[0];
+  const when = new Date(ts);
+  const ageMin = (Date.now() - when.getTime()) / 60000;
+  $("cur").textContent = fmt1(temp_c);
+  if (ageMin > OFFLINE_AFTER_MIN) {
+    $("curDot").className = "dot bad";
+    $("curStatus").textContent = `Датчик офлайн. Останній запис: ${fullFmt.format(when)}`;
+  } else {
+    $("curDot").className = "dot ok";
+    $("curStatus").textContent = `Оновлено о ${hmFmt.format(when)}`;
+  }
+}
+
+// ---------- Сьогодні ----------
+async function loadToday() {
+  const { data, error } = await sb.rpc("today_stats", { p_device: DEVICE_ID, p_tz: TZ });
+  if (error || !data?.length || !data[0].n) {
+    $("avg").textContent = "—";
+    $("minmax").innerHTML = "&nbsp;";
+    return;
+  }
+  const r = data[0];
+  $("avg").textContent = fmt1(r.avg_c);
+  $("minmax").textContent = `мін ${fmt1(r.min_c)} °C · макс ${fmt1(r.max_c)} °C`;
+}
+
+// ---------- Графік за 30 днів ----------
+let chart30 = null, data30 = [];
+
+async function load30() {
+  const { data, error } = await sb.rpc("daily_stats", { p_device: DEVICE_ID, p_days: 30, p_tz: TZ });
+  const box = $("err30");
+  if (error) { box.hidden = false; box.textContent = "Не вдалося завантажити графік: " + error.message; return; }
+  box.hidden = true;
+  data30 = data ?? [];
+  render30();
+}
+
+function render30() {
+  const days = [];
+  const t = todayStr();
+  for (let i = 29; i >= 0; i--) days.push(addDays(t, -i));
+  const map = new Map(data30.map(r => [r.day, r]));
+  const pick = (k) => days.map(d => (map.has(d) ? Number(map.get(d)[k]) : null));
+
+  const accent = css("--accent"), band = css("--band"), muted = css("--muted"), line = css("--line");
+  const cfg = {
+    type: "line",
+    data: {
+      labels: days,
+      datasets: [
+        { label: "Макс", data: pick("max_c"), borderWidth: 0, pointRadius: 0, backgroundColor: band, fill: "+1" },
+        { label: "Мін",  data: pick("min_c"), borderWidth: 0, pointRadius: 0, fill: false },
+        { label: "Середня", data: pick("avg_c"), borderColor: accent, backgroundColor: accent,
+          borderWidth: 2, pointRadius: 3, pointHoverRadius: 6, tension: 0.25, spanGaps: false },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      scales: {
+        x: { ticks: { color: muted, maxTicksLimit: 8, callback: (v, i) => shortDayFmt.format(new Date(days[i] + "T00:00:00Z")) }, grid: { color: line } },
+        y: { ticks: { color: muted, callback: (v) => v + "°" }, grid: { color: line } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          filter: (it) => it.datasetIndex === 2 || true,
+          callbacks: {
+            title: (items) => dayFmt.format(new Date(days[items[0].dataIndex] + "T00:00:00Z")),
+            label: (it) => it.raw == null ? null : `${it.dataset.label}: ${Number(it.raw).toFixed(1)} °C`,
+          },
+        },
+      },
+      onClick: (evt, _el, ch) => {
+        const pts = ch.getElementsAtEventForMode(evt, "index", { intersect: false }, true);
+        if (pts.length) selectDay(days[pts[0].index]);
+      },
+      onHover: (evt, el, ch) => { evt.native.target.style.cursor = "pointer"; },
+    },
+  };
+  if (chart30) chart30.destroy();
+  chart30 = new Chart($("chart30"), cfg);
+}
+
+// ---------- Деталізація за день ----------
+let chartDay = null, dayData = [], currentDay = todayStr();
+
+async function selectDay(day, { scroll = true } = {}) {
+  currentDay = day;
+  $("dayInput").value = day;
+  $("dayInput").max = todayStr();
+  $("next").disabled = day >= todayStr();
+  $("dayTitle").textContent = "Деталізація: " + dayFmt.format(new Date(day + "T00:00:00Z"));
+  if (scroll) $("daySection").scrollIntoView({ behavior: "smooth", block: "nearest" });
+
+  const { data, error } = await sb.rpc("day_readings", {
+    p_device: DEVICE_ID, p_day: day, p_tz: TZ, p_bucket_min: DAY_BUCKET_MIN,
+  });
+  if (day !== currentDay) return;                       // користувач уже вибрав інший день
+  const box = $("errDay");
+  if (error) { box.hidden = false; box.textContent = "Не вдалося завантажити день: " + error.message; return; }
+  box.hidden = true;
+  dayData = data ?? [];
+  renderDay();
+}
+
+function renderDay() {
+  $("dayEmpty").hidden = dayData.length > 0;
+
+  // Лінійна вісь X (хвилини від локальної півночі). Прогалини в даних лишаємо розривами.
+  const pts = [];
+  let prev = null;
+  for (const r of dayData) {
+    const x = minutesOfDay(new Date(r.ts));
+    if (prev !== null && x - prev > DAY_BUCKET_MIN * 3) pts.push({ x: prev + 1, y: null });
+    pts.push({ x, y: Number(r.temp_c) });
+    prev = x;
+  }
+
+  const accent = css("--accent"), muted = css("--muted"), line = css("--line");
+  const cfg = {
+    type: "line",
+    data: { datasets: [{
+      label: "Температура", data: pts, borderColor: accent, backgroundColor: accent,
+      borderWidth: 2, pointRadius: 0, pointHoverRadius: 5, tension: 0.2, spanGaps: false,
+    }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, parsing: false,
+      interaction: { mode: "nearest", axis: "x", intersect: false },
+      scales: {
+        x: { type: "linear", min: 0, max: 1440,
+          ticks: { color: muted, stepSize: 180, callback: (v) => hhmm(v % 1440) }, grid: { color: line } },
+        y: { ticks: { color: muted, callback: (v) => v + "°" }, grid: { color: line } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: (items) => hhmm(Math.round(items[0].parsed.x)),
+          label: (it) => `${it.parsed.y.toFixed(1)} °C`,
+        } },
+      },
+    },
+  };
+  if (chartDay) chartDay.destroy();
+  chartDay = new Chart($("chartDay"), cfg);
+}
+
+// ---------- Керування ----------
+$("dayInput").addEventListener("change", (e) => { if (e.target.value) selectDay(e.target.value, { scroll: false }); });
+$("prev").addEventListener("click", () => selectDay(addDays(currentDay, -1), { scroll: false }));
+$("next").addEventListener("click", () => { if (currentDay < todayStr()) selectDay(addDays(currentDay, 1), { scroll: false }); });
+$("todayBtn").addEventListener("click", () => selectDay(todayStr(), { scroll: false }));
+
+// Перемалювати графіки при зміні світлої/темної теми
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { render30(); renderDay(); });
+
+// ---------- Старт і оновлення ----------
+async function refreshLive() {
+  await Promise.all([loadCurrent(), loadToday()]);
+}
+refreshLive();
+load30();
+selectDay(todayStr(), { scroll: false });
+
+setInterval(refreshLive, 60 * 1000);                    // поточне значення і "сьогодні" — щохвилини
+setInterval(() => {                                     // сьогоднішній день у деталізації — раз на 5 хв
+  if (currentDay === todayStr()) selectDay(currentDay, { scroll: false });
+}, 5 * 60 * 1000);
+</script>
+</body>
+</html>
